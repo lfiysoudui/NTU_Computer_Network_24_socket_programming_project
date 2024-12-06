@@ -45,18 +45,8 @@ int main(int argc, char** argv){
     std::string choice_buf;
     int len = 14;
     bool login = false;
-    strcpy(buffer ,"HELLO,SERVER\0");
-    send(cli.conn_fd, &len, sizeof(int), 0);
-    send(cli.conn_fd, buffer, len, 0);
     bool online = true;
-    if(recv(cli.conn_fd, &len, sizeof(int), 0) <= 0){
-        close(cli.conn_fd);
-        online = false;
-    }
-    else {
-        recv(cli.conn_fd, buffer, len, 0);
-        online = true;
-    }
+    online = true;
     while(online){
         if(!login) {
             check_login();
