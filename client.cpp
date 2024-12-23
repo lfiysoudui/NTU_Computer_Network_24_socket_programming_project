@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define BUFFER_SIZE 4096
@@ -16,17 +18,19 @@ typedef struct {
     int conn_fd; // fd to talk with server
     char buf[BUFFER_SIZE]; // data sent by/to server
     size_t buf_len; // bytes used by buf
-
+    SSL *ssl;
 } client;
 
 client cli;
-static void init_client(char** argv);
+void init_client(char** argv);
 void check_login();
 void clilogin();
 void cliexit();
 bool account_action();
 bool checkstr(std::string item);
-static void print(char* buf, int len);
+void print(char* buf, int len);
+void initialize_openssl();
+SSL_CTX *create_context();
 
 char buffer[BUFFER_SIZE] = {0};
 
@@ -38,9 +42,17 @@ int main(int argc, char** argv){
     }
 
     // Handling connection
+    initialize_openssl();
+    SSL_CTX *ctx = create_context();
     init_client(argv);
+    cli.ssl = SSL_new(ctx);
+    SSL_set_fd(cli.ssl, cli.conn_fd);
+    if (SSL_connect(cli.ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+    }
     fprintf(stdout, "connect to %s %d\n", cli.ip, cli.port);
     fflush(stdout);
+
     char choose[4];
     std::string choice_buf;
     int len = 14;
@@ -68,8 +80,8 @@ int main(int argc, char** argv){
                 online = false;
                 len = 5;
                 strcpy(buffer,"EXIT\0");
-                send(cli.conn_fd, &len, sizeof(int), 0);
-                send(cli.conn_fd, buffer, len, 0);
+                SSL_write(cli.ssl, &len, sizeof(int));
+                SSL_write(cli.ssl, buffer, len);
                 break;
             
             default:
@@ -78,12 +90,16 @@ int main(int argc, char** argv){
         }
     }
     std::cout << "goodbye" << std::endl;
+
+    SSL_free(cli.ssl);
+    close(cli.conn_fd);
+    SSL_CTX_free(ctx);
     return 0;
 }
 
 
 
-static void init_client(char** argv){
+void init_client(char** argv){
     
     cli.ip = argv[1];
 
@@ -117,10 +133,10 @@ void check_login () {
     int len = 12;
     strcpy(buffer, "CHECK_LOGIN\0");
 
-    send(cli.conn_fd, &len, sizeof(int), 0);
-    send(cli.conn_fd, buffer, len, 0);
-    recv(cli.conn_fd, &len, sizeof(int), 0);
-    recv(cli.conn_fd, buffer, len, 0);
+    SSL_write(cli.ssl, &len, sizeof(int));
+    SSL_write(cli.ssl, buffer, len);
+    SSL_read(cli.ssl, &len, sizeof(int));
+    SSL_read(cli.ssl, buffer, len);
 
     if(!strcmp(buffer, "LOGIN_PLS\0")) {
         clilogin();
@@ -153,10 +169,10 @@ void clilogin(){
             len += input_0.length() + 1;
             strcpy(&buffer[len], input_1.c_str());
             len += input_1.length() + 1;
-            send(cli.conn_fd, &len, sizeof(int), 0);
-            send(cli.conn_fd, buffer, len, 0);
-            recv(cli.conn_fd, &len, sizeof(int), 0);
-            recv(cli.conn_fd, buffer, len, 0);
+            SSL_write(cli.ssl, &len, sizeof(int));
+            SSL_write(cli.ssl, buffer, len);
+            SSL_read(cli.ssl, &len, sizeof(int));
+            SSL_read(cli.ssl, buffer, len);
 
             if (!strcmp(buffer, "REG_SUCCESS")){
                 std::cout << "Registered successfully" << std::endl;
@@ -183,10 +199,10 @@ void clilogin(){
             len += input_0.length() + 1;
             strcpy(&buffer[len], input_1.c_str());
             len += input_1.length() + 1;
-            send(cli.conn_fd, &len, sizeof(int), 0);
-            send(cli.conn_fd, buffer, len, 0);
-            recv(cli.conn_fd, &len, sizeof(int), 0);
-            recv(cli.conn_fd, buffer, len, 0);
+            SSL_write(cli.ssl, &len, sizeof(int));
+            SSL_write(cli.ssl, buffer, len);
+            SSL_read(cli.ssl, &len, sizeof(int));
+            SSL_read(cli.ssl, buffer, len);
             if (!strcmp(buffer, "LOGIN_SUCCESS")){
                 std::cout << "Logged in successfully" << std::endl;
                 break;
@@ -221,10 +237,10 @@ bool account_action() {
             len = 7;
             strcpy(buffer,"LOGOUT\0");
 
-            send(cli.conn_fd, &len, sizeof(int), 0);
-            send(cli.conn_fd, buffer, len, 0);
-            recv(cli.conn_fd, &len, sizeof(int), 0);
-            recv(cli.conn_fd, buffer, len, 0);
+            SSL_write(cli.ssl, &len, sizeof(int));
+            SSL_write(cli.ssl, buffer, len);
+            SSL_read(cli.ssl, &len, sizeof(int));
+            SSL_read(cli.ssl, buffer, len);
                         
             if (strcmp(buffer,"LOGOUT_SUCCESS"))
                 std::cout << "Some error has occured, please retry" << buffer << std::endl;
@@ -238,10 +254,10 @@ bool account_action() {
             strcpy(&buffer[len], input.c_str());
             len += input.length() + 1;
 
-            send(cli.conn_fd, &len, sizeof(int), 0);
-            send(cli.conn_fd, buffer, len, 0);
-            recv(cli.conn_fd, &len, sizeof(int), 0);
-            recv(cli.conn_fd, buffer, len, 0);
+            SSL_write(cli.ssl, &len, sizeof(int));
+            SSL_write(cli.ssl, buffer, len);
+            SSL_read(cli.ssl, &len, sizeof(int));
+            SSL_read(cli.ssl, buffer, len);
 
             if (!strcmp(buffer,"PASSWD_ERR"))
                 std::cout << "The password is wrong" << std::endl;
@@ -271,10 +287,26 @@ bool checkstr (std::string item) {
     return false;
 }
 
-static void print(char* buf, int len) {
+void print(char* buf, int len) {
     for(int i = 0; i < len; ++i) {
         printf("%c", buf[i]);
     }
     printf("\n");
     fflush(stdout);
+}
+
+void initialize_openssl() {
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+}
+
+SSL_CTX *create_context() {
+    const SSL_METHOD *method = SSLv23_client_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return ctx;
 }

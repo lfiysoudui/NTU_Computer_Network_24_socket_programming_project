@@ -10,6 +10,9 @@
 #include <poll.h>
 #include <queue>
 #include <iomanip>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define LOG_PATH "./server_log"
@@ -89,6 +92,7 @@ class clients{
         }
         int logout (int i, int fd) {
             if(clientlist[i].confd == fd){
+                clientlist[i].confd = -1;
                 std::cout << "[CLIENT]\n<" << clientlist[i].username << "> logged out " << std::endl;
                 return 0;
             }
@@ -115,6 +119,7 @@ typedef struct {
     int conn_fd;        // fd to talk with client
     char host[512];     // client's host
     int usrno;
+    SSL *ssl;
 } request;
 
 //* ==================================== Global Variables ====================================
@@ -127,11 +132,14 @@ int maxfd;
 clients accounts;
 
 //* ==================================== function declare ====================================
+void initialize_openssl();
+SSL_CTX *create_context();
+void configure_context(SSL_CTX *ctx);
 void *worker_thread_func(void *arg);
-static void initialize_request(request* reqP);
-static void print(char* buf, int len);
+void initialize_request(request* reqP);
+void print(char* buf, int len);
 void handle_client(request req);
-static void init_server(unsigned short port);
+void init_server(unsigned short port);
 
 //* ==================================== main function ==================================== 
 int main(int argc, char **argv) {
@@ -144,6 +152,10 @@ int main(int argc, char **argv) {
     int file_fd;  // fd for file that we open for reading
     char buf[BUFFER_SIZE];
     int buf_len;
+
+    initialize_openssl();
+    SSL_CTX *ctx = create_context();
+    configure_context(ctx);
 
     if (argc != 2 ) {
         fprintf(stderr,"usage: [port], using default port 40311\n");
@@ -182,8 +194,14 @@ int main(int argc, char **argv) {
                 }
                 ERR_EXIT("accept");
             }
+            SSL *ssl = SSL_new(ctx);
+            SSL_set_fd(ssl, conn_fd);
+            if (SSL_accept(ssl) <= 0) {
+                ERR_print_errors_fp(stderr);
+            }
             request req;
             req.conn_fd = conn_fd;
+            req.ssl = ssl;
             strcpy(req.host, inet_ntoa(cliaddr.sin_addr));
             req.usrno = -1;
             fprintf(stdout, "getting a new request... fd %d from %s\n", conn_fd, req.host);
@@ -201,12 +219,44 @@ int main(int argc, char **argv) {
     }
 
     close(svr.listen_fd);
+    SSL_CTX_free(ctx);
     return 0;
 }
 
 //* ==================================== functions ====================================
 
-static void print(char* buf, int len) {
+void initialize_openssl() {
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+}
+
+SSL_CTX *create_context() {
+    const SSL_METHOD *method = SSLv23_server_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        perror("Unable to create SSL context\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return ctx;
+}
+
+void configure_context(SSL_CTX *ctx) {
+    // Load server certificate and private key
+    if (SSL_CTX_use_certificate_file(ctx, "cert/server.crt", SSL_FILETYPE_PEM) <= 0) {
+        perror("certificate not found\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "cert/private.key", SSL_FILETYPE_PEM) <= 0) {
+        perror("key not found\n");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void print(char* buf, int len) {
     for(int i = 0; i < len; ++i) {
         if(buf[i] == '\0') printf(" ");
         else printf("%c", buf[i]);
@@ -236,9 +286,8 @@ void handle_client(request req) {
     request clireq = req;
     char buffer[BUFFER_SIZE];
     char send_buf[BUFFER_SIZE];
-    int conn_fd = clireq.conn_fd;
     int Cond = 0;
-    std::cout << "Handling client from " << clireq.host << " on fd " << conn_fd << std::endl;
+    std::cout << "Handling client from " << clireq.host << " on fd " << clireq.conn_fd << std::endl;
 
     struct pollfd clipoll[1];
     clipoll[0].fd = clireq.conn_fd; 
@@ -250,16 +299,16 @@ void handle_client(request req) {
             int len;
 
             // Process the client request (simple echo here for demonstration)
-            if(recv(clipoll[0].fd, &len, sizeof(int), 0) <= 0){
+            if(SSL_read(clireq.ssl, &len, sizeof(int)) <= 0){
                 std::cout << "\n[CLI_LEFT][";
-                std::cout << std::setw(3) << conn_fd;
+                std::cout << std::setw(3) << clireq.conn_fd;
                 std::cout << "]"<< std::endl;
-                close(conn_fd);
+                close(clireq.conn_fd);
                 break;
             }
-            recv(conn_fd, buffer, len, 0);
+            SSL_read(clireq.ssl, buffer, len);
             std::cout << "\n[MSG_RECV][";
-            std::cout << std::setw(3) << conn_fd ;
+            std::cout << std::setw(3) << clireq.conn_fd ;
             std::cout << "][usr" ;
             std::cout << std::setw(3) << clireq.usrno;
             std::cout << "]len: " << len << std::endl;
@@ -290,8 +339,8 @@ void handle_client(request req) {
                             strcpy(send_buf,"PLZ_RETRY\0");
                             break;
                     }
-                    send(conn_fd, &len, sizeof(int), 0);
-                    send(conn_fd, send_buf, len * sizeof(char), 0);
+                    SSL_write(clireq.ssl, &len, sizeof(int));
+                    SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
                 else if (!strcmp(buffer, "LOGIN_REQ")) {
                     std::cout << "loginreq_0" << std::endl;
@@ -299,7 +348,7 @@ void handle_client(request req) {
                     std::string usrname(&buffer[len]);
                     len += usrname.length() + 1;
                     std::string passwd(&buffer[len]);
-                    int tmp = accounts.login(usrname, passwd, conn_fd);
+                    int tmp = accounts.login(usrname, passwd, clireq.conn_fd);
                     switch (tmp) {
                         case -1:
                             len = 11;
@@ -315,14 +364,14 @@ void handle_client(request req) {
                             strcpy(send_buf,"LOGIN_SUCCESS\0");
                             break;
                     }
-                    send(conn_fd, &len, sizeof(int), 0);
-                    send(conn_fd, send_buf, len * sizeof(char), 0);
+                    SSL_write(clireq.ssl, &len, sizeof(int));
+                    SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
                 else {
                     len = 10;
                     strcpy(send_buf, "LOGIN_PLS\0");
-                    send(conn_fd, &len, sizeof(int), 0);
-                    send(conn_fd, send_buf, len * sizeof(char), 0);
+                    SSL_write(clireq.ssl, &len, sizeof(int));
+                    SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
             }
             else {
@@ -341,11 +390,11 @@ void handle_client(request req) {
                             break;
                     }
                     print(send_buf,len);
-                    send(conn_fd, &len, sizeof(int), 0);
-                    send(conn_fd, send_buf, len * sizeof(char), 0);
+                    SSL_write(clireq.ssl, &len, sizeof(int));
+                    SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
                 else if (!strcmp(buffer, "LOGOUT")) {
-                    if(accounts.logout(clireq.usrno, conn_fd)) {
+                    if(accounts.logout(clireq.usrno, clireq.conn_fd)) {
                         clireq.usrno = -1;
                         len = 15;
                         strcpy(send_buf,"LOGOUT_SUCCESS\0");
@@ -354,18 +403,18 @@ void handle_client(request req) {
                         len = 14;
                         strcpy(send_buf,"LOGOUT_FAILED\0");
                     }
-                    send(conn_fd, &len, sizeof(int), 0);
-                    send(conn_fd, send_buf, len * sizeof(char), 0);
+                    SSL_write(clireq.ssl, &len, sizeof(int));
+                    SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
                 else if (!strcmp(buffer, "EXIT")) {
-                    close(conn_fd);
+                    close(clireq.conn_fd);
                     break;
                 }
                 else {
                     len = 9;
                     strcpy(send_buf, "LOGGEDIN\0");
-                    send(conn_fd, &len, sizeof(int), 0);
-                    send(conn_fd, send_buf, len * sizeof(char), 0);
+                    SSL_write(clireq.ssl, &len, sizeof(int));
+                    SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
             }
         }
@@ -373,12 +422,12 @@ void handle_client(request req) {
     std::cout << "handle_fin" << std::endl;
 }
 
-static void initialize_request (request* reqP) {
+void initialize_request (request* reqP) {
     reqP->conn_fd = -1;
     reqP->usrno = -1;
 }
 
-static void init_server(unsigned short port) {
+void init_server(unsigned short port) {
     struct sockaddr_in servaddr;
     int tmp;
 
