@@ -13,7 +13,8 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <fstream>
-
+#include <opencv2/opencv.hpp>
+// #include <io.h>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define LOG_PATH "./server_log"
@@ -22,6 +23,10 @@
 #define BUFFER_SIZE 4096
 #define USRNAME_MAX 64
 #define USRPASSWD_MAX 64
+
+#define FRAME_WIDTH 640
+#define FRAME_HEIGHT 480
+#define FRAME_RATE 30
 
 //* ==================================== Struct ====================================
 
@@ -87,6 +92,8 @@ class clients{
         void file_trans(SSL *ssl, int fd, std::string tg_name, std::string filename);
 
         void file_recv(SSL *cli_ssl, int fd, int usrno);
+
+        void streaming(SSL *cli_ssl, int fd, int usrno, std::string filename);
 };
 
 
@@ -445,6 +452,60 @@ void clients::file_recv(SSL *cli_ssl, int fd, int usrno){
     return;
 }
 
+void clients::streaming(SSL *cli_ssl, int fd, int usrno, std::string filename){
+    // Open the video capture (from camera or file)
+    cv::VideoCapture cap("files/to_stream/skibidi.mp4"); // 0 for webcam; use a file path for a video file
+    if (!cap.isOpened()) {
+        std::cerr << "Error: Could not open video source\n";
+        return;
+    }
+
+    // Resize frame
+    cap.set(cv::CAP_PROP_FRAME_WIDTH, FRAME_WIDTH);
+    cap.set(cv::CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT);
+    cap.set(cv::CAP_PROP_FPS, FRAME_RATE);
+
+    while (true) {
+        cv::Mat frame;
+        cap >> frame;
+        if (frame.empty()) break;
+
+        // Encode the frame to JPEG format
+        std::vector<uchar> encoded_frame;
+        cv::imencode(".jpg", frame, encoded_frame);
+
+        // Send the size of the encoded frame
+        int frame_size = encoded_frame.size();
+        if (SSL_write(cli_ssl, &frame_size, sizeof(frame_size)) < 0) {
+            std::cerr << "Error sending frame size\n";
+            break;
+        }
+
+        // Send the encoded frame data
+        if (SSL_write(cli_ssl, encoded_frame.data(), frame_size) < 0) {
+            std::cerr << "Error sending frame data\n";
+            break;
+        }
+
+        // Limit frame rate
+        cv::waitKey(1000 / FRAME_RATE);
+        int len;
+        char buffer[4096] = {0};
+        SSL_read(cli_ssl, &len, sizeof(int));
+        SSL_read(cli_ssl, buffer, len);
+        if (!strcmp(buffer, "STOP_STREAM")) {
+            std::cout << "[CLIENT][";
+            std::cout << std::setw(3) << usrno;
+            std::cout << "Stop streaming" << std::endl;
+            break;
+        }
+        else if (strcmp(buffer, "CONTINUE")!= 0) {
+            std::cout << "[CLIENT]error, received " << std::string(buffer) << std::endl;
+        }
+        
+
+    }
+}
 
 //* ==================================== functions ====================================
 
@@ -599,7 +660,24 @@ void handle_client(request req) {
                 }
             }
             else {
-                if (!strcmp(buffer, "RECV_FILE\0")) {
+                if(!strcmp(buffer, "STREAMING\0")) {
+                    std::string filename = "files/to_stream/" + std::string(&buffer[10]);
+                    if(access(filename.c_str(), F_OK) == -1) {
+                        len = 15;
+                        strcpy(send_buf,"FILE_NOT_FOUND\0");
+                        SSL_write(clireq.ssl, &len, sizeof(int));
+                        SSL_write(clireq.ssl, send_buf, len * sizeof(char));
+                        continue;
+                    }
+                    else {
+                        len = 11;
+                        strcpy(send_buf,"FILE_FOUND\0");
+                        SSL_write(clireq.ssl, &len, sizeof(int));
+                        SSL_write(clireq.ssl, send_buf, len * sizeof(char));
+                    }
+                    accounts.streaming(clireq.ssl, clireq.conn_fd, clireq.usrno, filename);
+                }
+                else if (!strcmp(buffer, "RECV_FILE\0")) {
                     accounts.file_recv(clireq.ssl, clireq.conn_fd, clireq.usrno);
                 }
                 else if (!strcmp(buffer, "FILE_SEND\0")) {

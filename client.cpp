@@ -9,7 +9,9 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <ncurses.h>
+#undef OK
 #include <fstream>
+#include <opencv2/opencv.hpp>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define BUFFER_SIZE 4096
@@ -36,6 +38,7 @@ SSL_CTX *create_context();
 void chatroom();
 void sendfile();
 void recvfile();
+void stream_video();
 void print(char* buf, int len);
 
 char buffer[BUFFER_SIZE] = {0};
@@ -73,9 +76,10 @@ int main(int argc, char** argv){
         std::cout << "\nplease choose the action";
         std::cout << "\n1. account";
         std::cout << "\n2. chatroom";
-        std::cout << "\n3. sendfile";
-        std::cout << "\n4. receivefile";
-        std::cout << "\n5. exit";
+        std::cout << "\n3. send file";
+        std::cout << "\n4. receive file";
+        std::cout << "\n5. stream video";
+        std::cout << "\n6. exit";
         std::cout << std::endl;
         getline(std::cin,choice_buf);
         std::cout << "input: " << choice_buf << std::endl;
@@ -98,6 +102,10 @@ int main(int argc, char** argv){
                 break;
             
             case '5':
+                stream_video();
+                break;
+            
+            case '6':
                 online = false;
                 len = 5;
                 strcpy(buffer,"EXIT\0");
@@ -579,4 +587,78 @@ void recvfile() {
         }
     }
     std::cout << "File received successfully\n" << std::endl;
+}
+
+void stream_video(){
+    std::string filename;
+    std::cout << "Please enter the file name: ";
+    getline(std::cin, filename);
+    strcpy(buffer, "STREAMING\0");
+    int len = 10;
+    strcpy(&buffer[len], filename.c_str());
+    len += filename.length() + 1;
+    SSL_write(cli.ssl, &len, sizeof(int));
+    SSL_write(cli.ssl, buffer, len);
+    SSL_read(cli.ssl, &len, sizeof(int));
+    SSL_read(cli.ssl, buffer, len);
+    if(!strcmp(buffer,"FILE_NOT_FOUND\0")) {
+        std::cout << "file not found" << std::endl;
+        return;
+    }
+    else if(!strcmp(buffer,"FILE_FOUND\0")) {
+        std::cout << "streaming in new window" << std::endl;
+        while (true)
+        {
+            // Receive the frame size
+            int frame_size;
+            SSL_read(cli.ssl, &frame_size, sizeof(int));
+            if (frame_size == -1) {
+                std::cout << "End of stream\n";
+                return;
+            }
+
+            // Receive the encoded frame data
+            std::vector<uchar> encoded_frame(frame_size);
+            int received = 0;
+            while (received < frame_size) {
+                int bytes = SSL_read(cli.ssl, encoded_frame.data() + received, frame_size - received);
+                if (bytes <= 0) {
+                    std::cerr << "Error receiving frame data\n";
+                    break;
+                }
+                received += bytes;
+            }
+
+            // Decode the frame
+            cv::Mat frame = cv::imdecode(encoded_frame, cv::IMREAD_COLOR);
+            if (frame.empty()) {
+                std::cerr << "Error decoding frame\n";
+                return;
+            }
+
+            // Display the frame
+        // Display the frame
+        cv::imshow("Video Stream", frame);
+        if (cv::waitKey(1) == 27) {
+            std::cout << "Stop streaming\n";
+            char buffer[4096] = {"STOP_STREAM"};
+            int len = 12;
+            SSL_write(cli.ssl, &len, sizeof(int));
+            SSL_write(cli.ssl, buffer, len);
+            break; // Stop if 'ESC' is pressed
+        }
+        else {
+            char buffer[4096] = {"CONTINUE"};
+            int len = 9;
+            SSL_write(cli.ssl, &len, sizeof(int));
+            SSL_write(cli.ssl, buffer, len);
+        }
+        }
+        return;
+    }
+    else {
+        std::cout << "error" << std::endl;
+        print(buffer,len);
+        return;
+    }
 }
