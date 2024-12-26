@@ -9,7 +9,7 @@ all: server.cpp client.cpp
 	$(CC) $(LOCAL) $(CFLAGS) -o client client.cpp
 
 test: test.cpp
-	$(CC) $(CFLAGS) -o test test.cpp
+	$(CC) $(LOCAL) $(CFLAGS) -o test test.cpp
 
 clean:
 	rm -f server client

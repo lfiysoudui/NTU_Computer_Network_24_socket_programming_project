@@ -3,3 +3,4 @@ cert/
 server
 server_log
 client
+file*

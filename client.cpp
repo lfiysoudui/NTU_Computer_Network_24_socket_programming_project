@@ -8,6 +8,8 @@
 #include <poll.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <ncurses.h>
+#include <fstream>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define BUFFER_SIZE 4096
@@ -31,6 +33,10 @@ bool checkstr(std::string item);
 void print(char* buf, int len);
 void initialize_openssl();
 SSL_CTX *create_context();
+void chatroom();
+void sendfile();
+void recvfile();
+void print(char* buf, int len);
 
 char buffer[BUFFER_SIZE] = {0};
 
@@ -66,7 +72,10 @@ int main(int argc, char** argv){
         }
         std::cout << "\nplease choose the action";
         std::cout << "\n1. account";
-        std::cout << "\n2. exit";
+        std::cout << "\n2. chatroom";
+        std::cout << "\n3. sendfile";
+        std::cout << "\n4. receivefile";
+        std::cout << "\n5. exit";
         std::cout << std::endl;
         getline(std::cin,choice_buf);
         std::cout << "input: " << choice_buf << std::endl;
@@ -77,6 +86,18 @@ int main(int argc, char** argv){
                 break;
             
             case '2':
+                chatroom();
+                break;
+            
+            case '3':
+                sendfile();
+                break;
+            
+            case '4':
+                recvfile();
+                break;
+            
+            case '5':
                 online = false;
                 len = 5;
                 strcpy(buffer,"EXIT\0");
@@ -309,4 +330,253 @@ SSL_CTX *create_context() {
         exit(EXIT_FAILURE);
     }
     return ctx;
+}
+
+void chatroom() {
+    strcpy(buffer,"CHATROOM\0");
+    int len = 9;
+
+    char snd_header[BUFFER_SIZE];
+    int header_len = 0;
+    {
+        std::string msg_tg;
+        std::cout << "Message to:";
+        getline(std::cin, msg_tg);
+        strcpy(&snd_header[header_len],msg_tg.c_str());
+        header_len += msg_tg.length();
+        strcpy(&snd_header[header_len],"\0");
+        header_len += 1;
+    }
+    strcpy(&buffer[len],snd_header);
+    len += header_len;
+    SSL_write(cli.ssl, &len, sizeof(int));
+    SSL_write(cli.ssl, buffer, len);
+    SSL_read(cli.ssl, &len, sizeof(int));
+    SSL_read(cli.ssl, buffer, len);
+    if(!strcmp(buffer,"USR_NOT_FOUND\0")) {
+        std::cout << "user not found" << std::endl;
+        return;
+    }
+    else if(!strcmp(buffer,"USR_NOT_ONLINE\0")) {
+        std::cout << "user not online" << std::endl;
+        return;
+    }
+    else if(strcmp(buffer,"PLEASE_SEND\0") != 0) {
+        std::cout << "error" << std::endl;
+        print(buffer,len);
+        return;
+    }
+    // initiate sending window
+        // Initialize ncurses
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);
+
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+
+    // Define window dimensions
+    int inputHeight = 3;
+    int messageHeight = rows - inputHeight;
+
+    // Create windows
+    WINDOW *messageWin = newwin(messageHeight, cols, 0, 0);
+    WINDOW *inputWin = newwin(inputHeight, cols, messageHeight, 0);
+
+    keypad(inputWin, TRUE);
+    nodelay(inputWin, TRUE);
+
+    // Enable scrolling for the message window
+    scrollok(messageWin, TRUE);
+
+    // Input and message history
+    std::string input;
+    std::vector<std::string> messages;
+
+    // Scroll offset
+    int scrollOffset = 0;
+    int V_TTL_MSG = 0;
+
+
+    struct pollfd h_poll[1];
+    h_poll[0].fd = cli.conn_fd;
+    h_poll[0].events = POLLIN;
+    int ct = 0;
+
+    while (true) {
+        // Display messages
+        werase(messageWin);
+        int totalMessages = messages.size();
+        int visibleMessages = messageHeight;
+
+        // Adjust the scroll offset to stay within bounds
+        if (scrollOffset < 0) {
+            scrollOffset = 0;
+        } else if (scrollOffset > totalMessages + V_TTL_MSG - visibleMessages) {
+            scrollOffset = totalMessages + V_TTL_MSG - visibleMessages;
+        }
+        if (scrollOffset < 0) scrollOffset = 0;
+
+        // Print messages based on scroll offset
+        int startLine = scrollOffset;
+        int msgn = startLine;
+        for (int i = 0; i < visibleMessages; i++) {
+            if (msgn < totalMessages) {
+                mvwprintw(messageWin, i, 0, "%s", messages[msgn].c_str());
+                i += (messages[msgn].length() / cols);
+                msgn++;
+            }
+        }
+        wrefresh(messageWin);
+
+        // Display the input bar
+        werase(inputWin);
+        mvwprintw(inputWin, 1, 1, "> %s", input.c_str());
+        wrefresh(inputWin);
+        // Handle the message from server
+        int ret = poll(h_poll, 1, 100);
+        if (ret > 0 && (h_poll[0].revents & POLLIN)) {
+            SSL_read(cli.ssl, &len, sizeof(int));
+            SSL_read(cli.ssl, buffer, len);
+            V_TTL_MSG += (std::string(buffer,len).length()-1)/cols;
+            messages.push_back(std::string(buffer,len));
+            scrollOffset = totalMessages + V_TTL_MSG - visibleMessages + 1;
+            if (scrollOffset < 0) scrollOffset = 0;
+            werase(messageWin);
+            continue;
+        }
+        else{
+            // Handle input
+            int ch = wgetch(inputWin);
+            if (ch == 10) { // Enter key
+                if (input == "quit") {
+                    strcpy(buffer,"LEAVE\0");
+                    len = 6;
+                    SSL_write(cli.ssl, &len, sizeof(int));
+                    SSL_write(cli.ssl, buffer, len);
+                    break;
+                }
+                if (!input.empty()) {
+                    // Send the message to server
+                    strcpy(buffer,snd_header);
+                    len = header_len;
+                    strcpy(&buffer[len],input.c_str());
+                    len += input.length()+1;
+                    std::cout << input << std::endl;
+                    buffer[len-1] = '\0';
+                    SSL_write(cli.ssl, &len, sizeof(int));
+                    SSL_write(cli.ssl, buffer, len);
+
+                    // Add the message to the message history
+                    input.insert(0, "You: ");
+                    V_TTL_MSG += (input.length()-1)/cols;
+                    messages.push_back(input);
+                    input.clear();
+
+                    // Reset scroll to show the latest message
+                    scrollOffset = totalMessages + V_TTL_MSG - visibleMessages + 1;
+                    if (scrollOffset < 0) scrollOffset = 0;
+                }
+            } else if (ch == KEY_BACKSPACE || ch == 127) { // Backspace
+                if (!input.empty()) {
+                    input.pop_back();
+                }
+            } else if (ch == KEY_UP) { // Scroll up
+                scrollOffset--;
+            } else if (ch == KEY_DOWN) { // Scroll down
+                scrollOffset++;
+            } else if (isprint(ch)) { // Printable characters
+                input.push_back(ch);
+            }
+        }
+    }
+
+    // Cleanup
+    delwin(messageWin);
+    delwin(inputWin);
+    endwin();
+}
+
+void sendfile() {
+    std::string filename;
+    std::string tg_name;
+    std::cout << "Please enter the file name: ";
+    getline(std::cin, filename);
+
+    // Open the file to send
+    std::ifstream infile(filename.c_str(), std::ios::binary);
+    if (!infile) {
+        std::cout << "Error opening file\n" << std::endl;
+        return;
+    }
+
+    std::cout << "Please enter the client to send: ";
+    getline(std::cin, tg_name);
+    strcpy(buffer, "FILE_SEND\0");
+    int len = 10;
+    strcpy(&buffer[len], tg_name.c_str());
+    len += tg_name.length() + 1;
+    strcpy(&buffer[len], filename.c_str());
+    len += filename.length() + 1;
+    SSL_write(cli.ssl, &len, sizeof(int));
+    SSL_write(cli.ssl, buffer, len);
+    SSL_read(cli.ssl, &len, sizeof(int));
+    SSL_read(cli.ssl, buffer, len);
+    print(buffer,len);
+    std::cout << len << std::endl;
+    if(!strcmp(buffer,"USR_NOT_FOUND\0")) {
+        std::cout << "user not found" << std::endl;
+        return;
+    }
+    else if(!strcmp(buffer,"PLEASE_SEND\0")) {
+        std::cout << "sending file" << std::endl;
+        // Send the file length
+        infile.seekg(0, std::ios::end);
+        long int file_length = infile.tellg();
+        infile.seekg(0, std::ios::beg);
+
+        SSL_write(cli.ssl, &file_length, sizeof(long int));
+        std::cout << "file length: " << file_length << std::endl;
+        // Send the file in chunks
+        while (infile.read(buffer, BUFFER_SIZE) || infile.gcount() > 0) {
+
+            SSL_write(cli.ssl,  buffer, infile.gcount());
+        }
+        std::cout << "File sent successfully\n";
+        return;
+    }
+    else {
+        std::cout << "error" << std::endl;
+        print(buffer,len);
+        return;
+    }
+}
+
+void recvfile() {
+    int len = 10;
+    int file_cnt;
+    strcpy(buffer, "RECV_FILE\0");
+    SSL_write(cli.ssl, &len, sizeof(int));
+    SSL_write(cli.ssl, buffer, len);
+    SSL_read(cli.ssl, &file_cnt, sizeof(int));
+    std::cout << "Received " << file_cnt << " files" << std::endl;
+    for (int i = 0; i < file_cnt; i++) {
+        SSL_read(cli.ssl, &len, sizeof(int));
+        SSL_read(cli.ssl, buffer, len);
+        std::string filename(buffer,len);
+        std::cout << "Receiving file: " << filename << std::endl;
+        std::ofstream outfile(filename.c_str(), std::ios::binary);
+        long int file_length;
+        SSL_read(cli.ssl, &file_length, sizeof(long int));
+        int bytes_received;
+        while ((bytes_received = SSL_read(cli.ssl, buffer, BUFFER_SIZE)) > 0) {
+            std::cout << "bytes_received: " << bytes_received << std::endl;
+            file_length -= bytes_received;
+            outfile.write(buffer, bytes_received);
+            if (file_length <= 0) break;
+        }
+    }
+    std::cout << "File received successfully\n" << std::endl;
 }

@@ -12,12 +12,13 @@
 #include <iomanip>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <fstream>
 
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define LOG_PATH "./server_log"
 
-#define MAX_CLIENTS 10
+#define MAX_CLIENTS 20
 #define BUFFER_SIZE 4096
 #define USRNAME_MAX 64
 #define USRPASSWD_MAX 64
@@ -37,81 +38,55 @@ typedef struct {
     int confd;
 } Client;
 
+typedef struct {
+    std::queue <std::string> *msg;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+}Chat_Msg;
+
+typedef struct {
+    std::queue <std::string> *filename;
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+}Trans_File;
+
+
 class clients{
     private:
         Client *clientlist;
         int client_list_size;
+        Chat_Msg *chatmsg;
+        Trans_File *transfile;
     public:
         clients(){
             client_list_size = MAX_CLIENTS;
             clientlist = (Client*) malloc(client_list_size * sizeof(Client));
+            chatmsg = (Chat_Msg*) malloc(client_list_size * sizeof(Chat_Msg));
+            transfile = (Trans_File*) malloc(client_list_size * sizeof(Trans_File));
             for (int i = 0; i < client_list_size; ++i) {
                 clientlist[i].empty = true;
                 clientlist[i].confd = -1;
+                chatmsg[i].msg = new std::queue<std::string>();
+                transfile[i].filename = new std::queue<std::string>();
             }
         }
 
         // 0 for success, 1 for no empty slots, 2 for unavailable username
-        int newclient (std::string usrname, std::string passwd) {
-            for (int i = 0; i < client_list_size; ++i) {
-                if (!clientlist[i].empty && strcmp(usrname.c_str(),clientlist[i].username) == 0) {
-                    std::cout << "[CLIENT]\nThe username is same as user <" << i << ">" << std::endl;
-                    return 2;
-                }
-            }
-            for (int i = 0; i < client_list_size; ++i) {
-                if (clientlist[i].empty) {
-                    strcpy(clientlist[i].username, usrname.c_str());
-                    strcpy(clientlist[i].password, passwd.c_str());
-                    clientlist[i].empty = false;
-                    std::cout << "[CLIENT]\nRegistered, user no. <" << i << ">" << std::endl;
-                    return 0;
-                }
-            }
-            std::cout << "[CLIENT]\nNo empty slots" << std::endl;
-            return 1;
-        }
+        int newclient (std::string usrname, std::string passwd);
 
         // usrno for success, -1 for wrong password, -2 for user not found
-        int login (std::string usrname, std::string passwd, int fd) {
-            for (int i = 0; i < client_list_size; ++i) {
-                if (strcmp(usrname.c_str(), clientlist[i].username) == 0 && !clientlist[i].empty) {
-                    if (strcmp(passwd.c_str(), clientlist[i].password) == 0) {
-                        std::cout << "[CLIENT]\nLogged in as <" << clientlist[i].username << ">" << std::endl;
-                        clientlist[i].confd = fd;
-                        return i;
-                    }
-                    else {
-                        std::cout << "[CLIENT]\nPassword error when user " << i << " logged in." << std::endl;
-                        return -1;
-                    }
-                }
-            }
-            std::cout << "[CLIENT]\nCan't find user" << std::endl;
-            return -2;
-        }
-        int logout (int i, int fd) {
-            if(clientlist[i].confd == fd){
-                clientlist[i].confd = -1;
-                std::cout << "[CLIENT]\n<" << clientlist[i].username << "> logged out " << std::endl;
-                return 0;
-            }
-            else {
-                std::cout << "[CLIENT]\n<" << clientlist[i].username << "> logout error" << std::endl;
-                return -1;
-            }
-        }
+        int login (std::string usrname, std::string passwd, int fd);
+
+        int logout (int i, int fd);
+
         // 0 for success, 1 for wrong password
-        int delclient (int usrno, std::string passwd) {
-            if (strcmp(passwd.c_str(), clientlist[usrno].password) == 0) {
-                clientlist[usrno].empty = true;
-                clientlist[usrno].confd = -1;
-                return 1;
-            }
-            else {
-                return 0;
-            }
-        }
+        int delclient (int usrno, std::string passwd);
+
+        void chatroom (int usrno, SSL *cli_ssl, int fd, std::string tg_name);
+
+        void file_trans(SSL *ssl, int fd, std::string tg_name, std::string filename);
+
+        void file_recv(SSL *cli_ssl, int fd, int usrno);
 };
 
 
@@ -223,6 +198,254 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+
+//* ==================================== class functions ====================================
+int clients::newclient (std::string usrname, std::string passwd) {
+    for (int i = 0; i < client_list_size; ++i) {
+        if (!clientlist[i].empty && strcmp(usrname.c_str(),clientlist[i].username) == 0) {
+            std::cout << "[CLIENT]\nThe username is same as user <" << i << ">" << std::endl;
+            return 2;
+        }
+    }
+    for (int i = 0; i < client_list_size; ++i) {
+        if (clientlist[i].empty) {
+            strcpy(clientlist[i].username, usrname.c_str());
+            strcpy(clientlist[i].password, passwd.c_str());
+            clientlist[i].empty = false;
+            std::cout << "[CLIENT]\nRegistered, user no. <" << i << ">" << std::endl;
+            return 0;
+        }
+    }
+    std::cout << "[CLIENT]\nNo empty slots" << std::endl;
+    return 1;
+}
+
+int clients::login (std::string usrname, std::string passwd, int fd) {
+    for (int i = 0; i < client_list_size; ++i) {
+        if (strcmp(usrname.c_str(), clientlist[i].username) == 0 && !clientlist[i].empty) {
+            if (strcmp(passwd.c_str(), clientlist[i].password) == 0) {
+                std::cout << "[CLIENT]\nLogged in as <" << clientlist[i].username << ">" << std::endl;
+                clientlist[i].confd = fd;
+                return i;
+            }
+            else {
+                std::cout << "[CLIENT]\nPassword error when user " << i << " logged in." << std::endl;
+                return -1;
+            }
+        }
+    }
+    std::cout << "[CLIENT]\nCan't find user" << std::endl;
+    return -2;
+}
+
+int clients::logout (int i, int fd) {
+    if(clientlist[i].confd == fd){
+        clientlist[i].confd = -1;
+        std::cout << "[CLIENT]\n<" << clientlist[i].username << "> logged out " << std::endl;
+        return 0;
+    }
+    else {
+        std::cout << "[CLIENT]\n<" << clientlist[i].username << "> logout error" << std::endl;
+        return -1;
+    }
+}
+
+int clients::delclient (int usrno, std::string passwd) {
+    if (strcmp(passwd.c_str(), clientlist[usrno].password) == 0) {
+        clientlist[usrno].empty = true;
+        clientlist[usrno].confd = -1;
+        return 1;
+    }
+    else {
+        return 0;
+    }
+}
+
+void clients::chatroom (int usrno, SSL *cli_ssl, int fd, std::string tg_name) {
+    for (int i = 0; i <= client_list_size; ++i) {
+        if(i == client_list_size) {
+            std::cout << "[CLIENT]\nNo such user" << std::endl;
+            char buffer[BUFFER_SIZE];
+            int len = 14;
+            strcpy(buffer,"USR_NOT_FOUND");
+            SSL_write(cli_ssl, &len, sizeof(int));
+            SSL_write(cli_ssl, buffer, len);
+            return;
+        }   
+        if (!clientlist[i].empty && !strcmp(clientlist[i].username,tg_name.c_str())) {
+            char buffer[BUFFER_SIZE];
+            int len = 12;
+            std::cout << "target user confd = " << clientlist[i].confd << std::endl;
+            if (clientlist[i].confd == -1) {
+                std::cout << "[CLIENT]\nUser not online" << std::endl;
+                int len = 15;
+                strcpy(buffer,"USR_NOT_ONLINE");
+                SSL_write(cli_ssl, &len, sizeof(int));
+                SSL_write(cli_ssl, buffer, len);
+                return;
+            }
+            len = 12;
+            strcpy(buffer, "PLEASE_SEND\0");
+            SSL_write(cli_ssl, &len, sizeof(int));
+            SSL_write(cli_ssl, buffer, len);
+            break;
+        }
+
+    }
+    std::cout << "[CLIENT]\n" << clientlist[usrno].username << " enter Chatroom" << std::endl;
+    struct pollfd chat_poll[1];
+    chat_poll[0].fd = fd;
+    chat_poll[0].events = POLLIN;
+    char chat_buffer[BUFFER_SIZE];
+    while(true) {
+        int req = poll(chat_poll, 1, 0);
+        if (chat_poll[0].revents & POLLIN) {
+            int len;
+            SSL_read(cli_ssl, &len, sizeof(int));
+            SSL_read(cli_ssl, chat_buffer, len);
+            std::cout << "[MSG_RECV][";
+            std::cout << std::setw(3) << fd;
+            std::cout << "][usr" ;
+            std::cout << std::setw(3) << usrno;
+            std::cout << "]len: " << len << std::endl;
+            print(chat_buffer, len);
+            if(!strcmp(chat_buffer,"LEAVE\0")) {
+                std::cout << "[CLIENT]\n" << clientlist[usrno].username << " leave Chatroom" << std::endl;
+                break;
+            }
+            for (int i = 0; i <= client_list_size; ++i) {
+                if(i == client_list_size) {
+                    std::cout << "[CLIENT]\nNo such user" << std::endl;
+                    break;
+                }   
+                if (!clientlist[i].empty && !strcmp(clientlist[i].username,chat_buffer)) {
+                    pthread_mutex_lock(&chatmsg[i].mutex);
+                    std::string msg = clientlist[usrno].username + std::string(": ") + std::string(&chat_buffer[strlen(chat_buffer)]+1);
+                    chatmsg[i].msg->push(msg);
+                    pthread_cond_signal(&chatmsg[i].cond);
+                    pthread_mutex_unlock(&chatmsg[i].mutex);
+                    std::cout << "[CLIENT]\nmessage add to " << clientlist[i].username << "'s queue" << std::endl;
+                    break;
+                }
+
+            }
+        }
+        // check if there is any message in the queue
+        pthread_mutex_lock(&chatmsg[usrno].mutex);
+        while(!chatmsg[usrno].msg->empty()) {
+            strcpy(chat_buffer,chatmsg[usrno].msg->front().c_str());
+            chat_buffer[strlen(chatmsg[usrno].msg->front().c_str())] = '\0';
+            chatmsg[usrno].msg->pop();
+            std::cout << "[MSG_SEND][";
+            std::cout << std::setw(3) << fd;
+            std::cout << "][usr" ; 
+            std::cout << std::setw(3) << usrno;
+            std::cout << "]len: " << strlen(chat_buffer) + 1 << std::endl;
+            print(chat_buffer, strlen(chat_buffer) + 1);
+            int len = strlen(chat_buffer) + 1;
+            SSL_write(cli_ssl, &len, sizeof(int));
+            SSL_write(cli_ssl, chat_buffer, len);
+        }
+        pthread_cond_signal(&chatmsg[usrno].cond);
+        pthread_mutex_unlock(&chatmsg[usrno].mutex);
+    }
+}
+
+void clients::file_trans(SSL *cli_ssl, int fd, std::string tg_name, std::string filename){
+    int tg_no = -1;
+    int len;
+    char send_buf[BUFFER_SIZE];
+    char buffer[BUFFER_SIZE]; 
+
+    for (int i = 0; i <= client_list_size; ++i) {
+        if(i == client_list_size) {
+            std::cout << "[CLIENT]\nNo such user" << std::endl;
+            break;
+        }   
+        if (!clientlist[i].empty && !strcmp(clientlist[i].username,tg_name.c_str())) {
+            tg_no = i;
+            std::cout << "[CLIENT]\nUser found <" << tg_no << ">" << std::endl;
+            break;
+        }
+    }
+
+    if(tg_no == -1) {
+        int len = 14;
+        strcpy(send_buf,"USR_NOT_FOUND\0");
+        SSL_write(cli_ssl, &len, sizeof(int));
+        SSL_write(cli_ssl, send_buf, len);
+        return;
+    }
+    len = 12;
+    strcpy(send_buf, "PLEASE_SEND\0");
+    SSL_write(cli_ssl, &len, sizeof(int));
+    SSL_write(cli_ssl, send_buf, len);
+
+    // Open the file to write the received data
+    std::ofstream outfile(filename.c_str(), std::ios::binary);
+
+    // Receive the file in chunks
+    long int file_length;
+    SSL_read(cli_ssl, &file_length, sizeof(long int));
+    int bytes_received;
+    while ((bytes_received = SSL_read(cli_ssl, buffer, BUFFER_SIZE)) > 0) {
+        std::cout << "bytes_received: " << bytes_received << std::endl;
+        file_length -= bytes_received;
+        outfile.write(buffer, bytes_received);
+        if (file_length <= 0) break;
+    }
+    outfile.close();
+    std::cout << "received, saving " << filename << " into queue\n" << std::endl;
+    pthread_mutex_lock(&transfile[tg_no].mutex);
+    transfile[tg_no].filename->push(filename);
+    pthread_cond_signal(&transfile[tg_no].cond);
+    pthread_mutex_unlock(&transfile[tg_no].mutex);
+    std::cout << "File received successfully\n" << std::endl;
+    return;
+}
+
+void clients::file_recv(SSL *cli_ssl, int fd, int usrno){
+    int tg_no = -1;
+    int len;
+    char send_buf[BUFFER_SIZE];
+    char buffer[BUFFER_SIZE]; 
+
+    int file_cnt = transfile[usrno].filename->size();
+    SSL_write(cli_ssl, &file_cnt, sizeof(int));
+    len = 12;
+    for(int i = file_cnt; i > 0; i--) {
+        // grep and send the filename
+        std::string filename = transfile[usrno].filename->front();
+        size_t pos = filename.find(std::string("files/"));
+        if (pos != std::string::npos)
+            filename.erase(pos, std::string("files/").length());
+        len = filename.length();
+        strcpy(send_buf, filename.c_str());
+        SSL_write(cli_ssl, &len, sizeof(int));
+        SSL_write(cli_ssl, send_buf, len);
+
+        std::cout << "sending file: " << filename << std::endl;
+        std::ifstream infile(filename.c_str(), std::ios::binary);
+        // Send the file length
+        infile.seekg(0, std::ios::end);
+        long int file_length = infile.tellg();
+        infile.seekg(0, std::ios::beg);
+        SSL_write(cli_ssl, &file_length, sizeof(long int));
+        
+        // Send the file in chunks
+        while (infile.read(buffer, BUFFER_SIZE) || infile.gcount() > 0) {
+
+            SSL_write(cli_ssl,  buffer, infile.gcount());
+        }
+        std::cout << "File sent successfully\n";
+        transfile[usrno].filename->pop();
+        infile.close();
+    }
+
+    return;
+}
+
+
 //* ==================================== functions ====================================
 
 void initialize_openssl() {
@@ -258,7 +481,7 @@ void configure_context(SSL_CTX *ctx) {
 
 void print(char* buf, int len) {
     for(int i = 0; i < len; ++i) {
-        if(buf[i] == '\0') printf(" ");
+        if(buf[i] == '\0') printf("ø");
         else printf("%c", buf[i]);
     }
     printf("\n");
@@ -300,6 +523,7 @@ void handle_client(request req) {
 
             // Process the client request (simple echo here for demonstration)
             if(SSL_read(clireq.ssl, &len, sizeof(int)) <= 0){
+                accounts.logout(clireq.usrno, clireq.conn_fd);
                 std::cout << "\n[CLI_LEFT][";
                 std::cout << std::setw(3) << clireq.conn_fd;
                 std::cout << "]"<< std::endl;
@@ -375,7 +599,19 @@ void handle_client(request req) {
                 }
             }
             else {
-                if (!strcmp(buffer, "DELETE_ACCOUNT")) {
+                if (!strcmp(buffer, "RECV_FILE\0")) {
+                    accounts.file_recv(clireq.ssl, clireq.conn_fd, clireq.usrno);
+                }
+                else if (!strcmp(buffer, "FILE_SEND\0")) {
+                    std::string tg_name = std::string(&buffer[10]);
+                    std::string filename = "files/" + std::string(&buffer[11+tg_name.length()]);
+                    std::cout  << "target user: " << tg_name << "\nfilename: " << filename << std::endl;
+                    accounts.file_trans(clireq.ssl, clireq.conn_fd, tg_name, filename);
+                }
+                else if (!strcmp(buffer, "CHATROOM")) {
+                    accounts.chatroom(clireq.usrno, clireq.ssl, clireq.conn_fd, std::string(&buffer[9]));
+                }
+                else if (!strcmp(buffer, "DELETE_ACCOUNT")) {
                     len = 10;
                     std::string passwd(&buffer[14]);
                     switch (accounts.delclient(clireq.usrno, passwd)) {
@@ -394,7 +630,7 @@ void handle_client(request req) {
                     SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
                 else if (!strcmp(buffer, "LOGOUT")) {
-                    if(accounts.logout(clireq.usrno, clireq.conn_fd)) {
+                    if(accounts.logout(clireq.usrno, clireq.conn_fd) == 0) {
                         clireq.usrno = -1;
                         len = 15;
                         strcpy(send_buf,"LOGOUT_SUCCESS\0");
@@ -407,6 +643,8 @@ void handle_client(request req) {
                     SSL_write(clireq.ssl, send_buf, len * sizeof(char));
                 }
                 else if (!strcmp(buffer, "EXIT")) {
+                    if(clireq.usrno != -1)
+                        accounts.logout(clireq.usrno, clireq.conn_fd);
                     close(clireq.conn_fd);
                     break;
                 }
