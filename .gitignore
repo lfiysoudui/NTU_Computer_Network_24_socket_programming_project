@@ -4,3 +4,4 @@ server
 server_log
 client
 *.mp4
+.DS_Store
