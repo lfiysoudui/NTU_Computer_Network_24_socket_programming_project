@@ -46,7 +46,9 @@ After the client connected to the server, please follow the instruction to login
 ## Work Directory Structure when running the program
 server.cpp
 ```bash
-
+cert/
+    server.crt
+    private.key
 files/
     to_stream/
 ```
