@@ -369,6 +369,10 @@ void chatroom() {
         std::cout << "user not online" << std::endl;
         return;
     }
+    else if(!strcmp(buffer,"USR_SELF\0")) {
+        std::cout << "receiver can't be same as sender" << std::endl;
+        return;
+    }
     else if(strcmp(buffer,"PLEASE_SEND\0") != 0) {
         std::cout << "error" << std::endl;
         print(buffer,len);
@@ -535,6 +539,7 @@ void sendfile() {
     std::cout << len << std::endl;
     if(!strcmp(buffer,"USR_NOT_FOUND\0")) {
         std::cout << "user not found" << std::endl;
+        infile.close();
         return;
     }
     else if(!strcmp(buffer,"PLEASE_SEND\0")) {
@@ -552,11 +557,13 @@ void sendfile() {
             SSL_write(cli.ssl,  buffer, infile.gcount());
         }
         std::cout << "File sent successfully\n";
+        infile.close();
         return;
     }
     else {
         std::cout << "error" << std::endl;
         print(buffer,len);
+        infile.close();
         return;
     }
 }
@@ -588,6 +595,7 @@ void recvfile() {
                 if (file_length <= 0) break;
             }
         }
+        outfile.close();
     }
     std::cout << "File received successfully\n" << std::endl;
 }
@@ -611,8 +619,8 @@ void stream_video(){
     else if(!strcmp(buffer,"FILE_FOUND\0")) {
         int port;
         SSL_read(cli.ssl, &port, sizeof(int));
-        std::cout << "streaming in new window" << std::endl;
-        std::string stream_command = "ffplay -loglevel quiet udp://127.0.0.1:" + std::to_string(23456) + " &";
+        std::cout << "streaming in new window, using port " << port << std::endl;
+        std::string stream_command = "ffplay -loglevel quiet udp://127.0.0.1:" + std::to_string(port) + " &";
         system(stream_command.c_str());
         sleep(1);
         len = 6;

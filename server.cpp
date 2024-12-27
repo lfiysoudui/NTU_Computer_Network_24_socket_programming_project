@@ -20,13 +20,11 @@
 #define LOG_PATH "./server_log"
 
 #define MAX_CLIENTS 20
+#define MAX_THREADS 10
 #define BUFFER_SIZE 65536
 #define USRNAME_MAX 64
 #define USRPASSWD_MAX 64
 
-#define FRAME_WIDTH 640
-#define FRAME_HEIGHT 480
-#define FRAME_RATE 30
 
 //* ==================================== Struct ====================================
 
@@ -155,8 +153,8 @@ int main(int argc, char **argv) {
     h_poll[0].events = POLLIN;
 
     // Create a thread pool
-    pthread_t threads[MAX_CLIENTS];
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+    pthread_t threads[MAX_THREADS];
+    for (int i = 0; i < MAX_THREADS; ++i) {
         pthread_create(&threads[i], NULL, worker_thread_func, NULL);
     }
 
@@ -196,7 +194,7 @@ int main(int argc, char **argv) {
     }
 
     // Join threads and clean up
-    for (int i = 0; i < MAX_CLIENTS; ++i) {
+    for (int i = 0; i < MAX_THREADS; ++i) {
         pthread_join(threads[i], NULL);
     }
 
@@ -269,6 +267,7 @@ int clients::delclient (int usrno, std::string passwd) {
 }
 
 void clients::chatroom (int usrno, SSL *cli_ssl, int fd, std::string tg_name) {
+    int tg_no = -1;
     for (int i = 0; i <= client_list_size; ++i) {
         if(i == client_list_size) {
             std::cout << "[CLIENT]\nNo such user" << std::endl;
@@ -292,6 +291,16 @@ void clients::chatroom (int usrno, SSL *cli_ssl, int fd, std::string tg_name) {
                 return;
             }
             len = 12;
+            tg_no = i;
+            if(usrno == tg_no) {
+                std::cout << "[CLIENT]\nsender == receiver" << std::endl;
+                char buffer[BUFFER_SIZE];
+                int len = 9;
+                strcpy(buffer,"USR_SELF\0");
+                SSL_write(cli_ssl, &len, sizeof(int));
+                SSL_write(cli_ssl, buffer, len);
+                return;
+            }   
             strcpy(buffer, "PLEASE_SEND\0");
             SSL_write(cli_ssl, &len, sizeof(int));
             SSL_write(cli_ssl, buffer, len);
@@ -299,7 +308,15 @@ void clients::chatroom (int usrno, SSL *cli_ssl, int fd, std::string tg_name) {
         }
 
     }
+
+    // welcome message
     std::cout << "[CLIENT]\n" << clientlist[usrno].username << " enter Chatroom" << std::endl;
+    pthread_mutex_lock(&chatmsg[tg_no].mutex);
+    std::string msg = clientlist[usrno].username + std::string(" had enter the Chatroom");
+    chatmsg[tg_no].msg->push(msg);
+    pthread_cond_signal(&chatmsg[tg_no].cond);
+    pthread_mutex_unlock(&chatmsg[tg_no].mutex);
+    // start chat
     struct pollfd chat_poll[1];
     chat_poll[0].fd = fd;
     chat_poll[0].events = POLLIN;
@@ -317,24 +334,21 @@ void clients::chatroom (int usrno, SSL *cli_ssl, int fd, std::string tg_name) {
             std::cout << "]len: " << len << std::endl;
             print(chat_buffer, len);
             if(!strcmp(chat_buffer,"LEAVE\0")) {
+                pthread_mutex_lock(&chatmsg[tg_no].mutex);
+                msg = clientlist[usrno].username + std::string(" had left the Chatroom");
+                chatmsg[tg_no].msg->push(msg);
+                pthread_cond_signal(&chatmsg[tg_no].cond);
+                pthread_mutex_unlock(&chatmsg[tg_no].mutex);
                 std::cout << "[CLIENT]\n" << clientlist[usrno].username << " leave Chatroom" << std::endl;
                 break;
             }
-            for (int i = 0; i <= client_list_size; ++i) {
-                if(i == client_list_size) {
-                    std::cout << "[CLIENT]\nNo such user" << std::endl;
-                    break;
-                }   
-                if (!clientlist[i].empty && !strcmp(clientlist[i].username,chat_buffer)) {
-                    pthread_mutex_lock(&chatmsg[i].mutex);
-                    std::string msg = clientlist[usrno].username + std::string(": ") + std::string(&chat_buffer[strlen(chat_buffer)]+1);
-                    chatmsg[i].msg->push(msg);
-                    pthread_cond_signal(&chatmsg[i].cond);
-                    pthread_mutex_unlock(&chatmsg[i].mutex);
-                    std::cout << "[CLIENT]\nmessage add to " << clientlist[i].username << "'s queue" << std::endl;
-                    break;
-                }
-
+            else if (!clientlist[tg_no].empty && !strcmp(clientlist[tg_no].username,chat_buffer)) {
+                pthread_mutex_lock(&chatmsg[tg_no].mutex);
+                std::string msg = clientlist[usrno].username + std::string(": ") + std::string(&chat_buffer[strlen(chat_buffer)]+1);
+                chatmsg[tg_no].msg->push(msg);
+                pthread_cond_signal(&chatmsg[tg_no].cond);
+                pthread_mutex_unlock(&chatmsg[tg_no].mutex);
+                std::cout << "[CLIENT]\nmessage add to " << clientlist[tg_no].username << "'s queue" << std::endl;
             }
         }
         // check if there is any message in the queue
@@ -411,6 +425,7 @@ void clients::file_trans(SSL *cli_ssl, int fd, std::string tg_name, std::string 
     pthread_cond_signal(&transfile[tg_no].cond);
     pthread_mutex_unlock(&transfile[tg_no].mutex);
     std::cout << "File received successfully\n" << std::endl;
+    outfile.close();
     return;
 }
 
@@ -471,7 +486,7 @@ void clients::streaming(SSL *cli_ssl, int fd, int usrno, std::string filename){
         return;
     }
     std::cout << "buffer checked" << std::endl;
-    std::string stream_command = "ffmpeg -loglevel quiet -i " + filename + " -c:v libx264 -f mpegts udp://127.0.0.1:" + std::to_string(23456);
+    std::string stream_command = "ffmpeg -loglevel quiet -i " + filename + " -c:v libx264 -f mpegts udp://127.0.0.1:" + std::to_string(port);
     // ffmpeg -loglevel quiet -i input_video.mp4 -c:v libx264 -preset veryfast -b:v 1500k -c:a aac -b:a 128k -f mpegts udp://
     std::cout << "running :" << stream_command << std::endl;
     system(stream_command.c_str());
@@ -631,7 +646,7 @@ void handle_client(request req) {
             }
             else {
                 if(!strcmp(buffer, "STREAMING\0")) {
-                    std::string filename = "files/to_stream/" + std::string(&buffer[10]);
+                    std::string filename = "files/to_stream/" + std::string(&buffer[10]) + ".mp4";
                     if(access(filename.c_str(), F_OK) == -1) {
                         len = 15;
                         strcpy(send_buf,"FILE_NOT_FOUND\0");
@@ -644,7 +659,7 @@ void handle_client(request req) {
                         strcpy(send_buf,"FILE_FOUND\0");
                         SSL_write(clireq.ssl, &len, sizeof(int));
                         SSL_write(clireq.ssl, send_buf, len * sizeof(char));
-                        len = 12345+req.usrno;
+                        len = 12345+clireq.usrno;
                         SSL_write(clireq.ssl, &len, sizeof(int));
                     }
                     accounts.streaming(clireq.ssl, clireq.conn_fd, clireq.usrno, filename);
@@ -699,6 +714,7 @@ void handle_client(request req) {
                     break;
                 }
                 else {
+                    std::cout << "error" << std::endl;
                     len = 9;
                     strcpy(send_buf, "LOGGEDIN\0");
                     SSL_write(clireq.ssl, &len, sizeof(int));
