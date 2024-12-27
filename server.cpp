@@ -13,8 +13,6 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <fstream>
-// #include <opencv2/opencv.hpp>
-// #include <io.h>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define LOG_PATH "./server_log"

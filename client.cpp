@@ -11,7 +11,6 @@
 #include <ncurses.h>
 #undef OK
 #include <fstream>
-// #include <opencv2/opencv.hpp>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define BUFFER_SIZE 65536
