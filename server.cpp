@@ -395,11 +395,14 @@ void clients::file_trans(SSL *cli_ssl, int fd, std::string tg_name, std::string 
     long int file_length;
     SSL_read(cli_ssl, &file_length, sizeof(long int));
     int bytes_received;
-    while ((bytes_received = SSL_read(cli_ssl, buffer, BUFFER_SIZE)) > 0) {
-        std::cout << "bytes_received: " << bytes_received << std::endl;
-        file_length -= bytes_received;
-        outfile.write(buffer, bytes_received);
-        if (file_length <= 0) break;
+    // Receive the file in chunks
+    if(file_length != 0) {
+        while ((bytes_received = SSL_read(cli_ssl, buffer, BUFFER_SIZE)) > 0) {
+            std::cout << "bytes_received: " << bytes_received << std::endl;
+            file_length -= bytes_received;
+            outfile.write(buffer, bytes_received);
+            if (file_length <= 0) break;
+        }
     }
     outfile.close();
     std::cout << "received, saving " << filename << " into queue\n" << std::endl;
@@ -421,8 +424,12 @@ void clients::file_recv(SSL *cli_ssl, int fd, int usrno){
     SSL_write(cli_ssl, &file_cnt, sizeof(int));
     len = 12;
     for(int i = file_cnt; i > 0; i--) {
-        // grep and send the filename
+        // grep and send the filename (opening the stream first)
+        std::string org_filename = transfile[usrno].filename->front();
         std::string filename = transfile[usrno].filename->front();
+        std::ifstream infile(org_filename.c_str(), std::ios::binary);
+        std::cout << "sending file: " << filename << std::endl;
+
         size_t pos = filename.find(std::string("files/"));
         if (pos != std::string::npos)
             filename.erase(pos, std::string("files/").length());
@@ -430,9 +437,6 @@ void clients::file_recv(SSL *cli_ssl, int fd, int usrno){
         strcpy(send_buf, filename.c_str());
         SSL_write(cli_ssl, &len, sizeof(int));
         SSL_write(cli_ssl, send_buf, len);
-
-        std::cout << "sending file: " << filename << std::endl;
-        std::ifstream infile(filename.c_str(), std::ios::binary);
         // Send the file length
         infile.seekg(0, std::ios::end);
         long int file_length = infile.tellg();
@@ -445,6 +449,7 @@ void clients::file_recv(SSL *cli_ssl, int fd, int usrno){
             SSL_write(cli_ssl,  buffer, infile.gcount());
         }
         std::cout << "File sent successfully\n";
+        remove(org_filename.c_str());
         transfile[usrno].filename->pop();
         infile.close();
     }

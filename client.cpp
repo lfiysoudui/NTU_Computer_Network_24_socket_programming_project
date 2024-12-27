@@ -532,7 +532,6 @@ void sendfile() {
     SSL_write(cli.ssl, buffer, len);
     SSL_read(cli.ssl, &len, sizeof(int));
     SSL_read(cli.ssl, buffer, len);
-    print(buffer,len);
     std::cout << len << std::endl;
     if(!strcmp(buffer,"USR_NOT_FOUND\0")) {
         std::cout << "user not found" << std::endl;
@@ -579,11 +578,15 @@ void recvfile() {
         long int file_length;
         SSL_read(cli.ssl, &file_length, sizeof(long int));
         int bytes_received;
-        while ((bytes_received = SSL_read(cli.ssl, buffer, BUFFER_SIZE)) > 0) {
-            std::cout << "bytes_received: " << bytes_received << std::endl;
-            file_length -= bytes_received;
-            outfile.write(buffer, bytes_received);
-            if (file_length <= 0) break;
+
+        // Receive the file in chunks
+        if(file_length != 0) {
+            while ((bytes_received = SSL_read(cli.ssl, buffer, BUFFER_SIZE)) > 0) {
+                std::cout << "bytes_received: " << bytes_received << std::endl;
+                file_length -= bytes_received;
+                outfile.write(buffer, bytes_received);
+                if (file_length <= 0) break;
+            }
         }
     }
     std::cout << "File received successfully\n" << std::endl;
