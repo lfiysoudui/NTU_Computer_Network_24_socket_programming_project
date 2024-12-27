@@ -12,7 +12,7 @@ This project consists of a server (server.cpp) and a client (client.cpp). It sup
 ```bash
 ./server <optional port>
 ```
-After the server started, it will listen on the specified port.
+After the server started, it will listen on the specified port or port `40311`.
 ### Client
 ```bash
 ./client <server ip> <server port>
