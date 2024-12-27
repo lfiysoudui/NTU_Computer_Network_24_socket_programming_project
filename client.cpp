@@ -11,10 +11,10 @@
 #include <ncurses.h>
 #undef OK
 #include <fstream>
-#include <opencv2/opencv.hpp>
+// #include <opencv2/opencv.hpp>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 65536
 
 typedef struct {
     char* ip; // server's ip
@@ -606,54 +606,16 @@ void stream_video(){
         return;
     }
     else if(!strcmp(buffer,"FILE_FOUND\0")) {
+        int port;
+        SSL_read(cli.ssl, &port, sizeof(int));
         std::cout << "streaming in new window" << std::endl;
-        while (true)
-        {
-            // Receive the frame size
-            int frame_size;
-            SSL_read(cli.ssl, &frame_size, sizeof(int));
-            if (frame_size == -1) {
-                std::cout << "End of stream\n";
-                return;
-            }
-
-            // Receive the encoded frame data
-            std::vector<uchar> encoded_frame(frame_size);
-            int received = 0;
-            while (received < frame_size) {
-                int bytes = SSL_read(cli.ssl, encoded_frame.data() + received, frame_size - received);
-                if (bytes <= 0) {
-                    std::cerr << "Error receiving frame data\n";
-                    break;
-                }
-                received += bytes;
-            }
-
-            // Decode the frame
-            cv::Mat frame = cv::imdecode(encoded_frame, cv::IMREAD_COLOR);
-            if (frame.empty()) {
-                std::cerr << "Error decoding frame\n";
-                return;
-            }
-
-            // Display the frame
-        // Display the frame
-        cv::imshow("Video Stream", frame);
-        if (cv::waitKey(1) == 27) {
-            std::cout << "Stop streaming\n";
-            char buffer[4096] = {"STOP_STREAM"};
-            int len = 12;
-            SSL_write(cli.ssl, &len, sizeof(int));
-            SSL_write(cli.ssl, buffer, len);
-            break; // Stop if 'ESC' is pressed
-        }
-        else {
-            char buffer[4096] = {"CONTINUE"};
-            int len = 9;
-            SSL_write(cli.ssl, &len, sizeof(int));
-            SSL_write(cli.ssl, buffer, len);
-        }
-        }
+        std::string stream_command = "ffplay -loglevel quiet udp://127.0.0.1:" + std::to_string(23456) + " &";
+        system(stream_command.c_str());
+        sleep(1);
+        len = 6;
+        strcpy(buffer,"READY\0");
+        SSL_write(cli.ssl, &len, sizeof(int));
+        SSL_write(cli.ssl, buffer, len);
         return;
     }
     else {

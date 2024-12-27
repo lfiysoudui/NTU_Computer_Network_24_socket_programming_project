@@ -13,14 +13,14 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <fstream>
-#include <opencv2/opencv.hpp>
+// #include <opencv2/opencv.hpp>
 // #include <io.h>
 
 #define ERR_EXIT(a) do { perror(a); exit(1); } while(0)
 #define LOG_PATH "./server_log"
 
 #define MAX_CLIENTS 20
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 65536
 #define USRNAME_MAX 64
 #define USRPASSWD_MAX 64
 
@@ -454,57 +454,22 @@ void clients::file_recv(SSL *cli_ssl, int fd, int usrno){
 
 void clients::streaming(SSL *cli_ssl, int fd, int usrno, std::string filename){
     // Open the video capture (from camera or file)
-    cv::VideoCapture cap("files/to_stream/skibidi.mp4"); // 0 for webcam; use a file path for a video file
-    if (!cap.isOpened()) {
-        std::cerr << "Error: Could not open video source\n";
+    int port = 12345 + usrno;
+    int len;
+    char buffer[BUFFER_SIZE];
+    std::cout << "reading buffer" << std::endl;
+    SSL_read(cli_ssl, &len, sizeof(int));
+    SSL_read(cli_ssl, buffer, len);
+    if(strcmp(buffer,"READY\0") != 0) {
+        std::cout << "error" << std::endl;
+        print(buffer,len);
         return;
     }
-
-    // Resize frame
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, FRAME_WIDTH);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT);
-    cap.set(cv::CAP_PROP_FPS, FRAME_RATE);
-
-    while (true) {
-        cv::Mat frame;
-        cap >> frame;
-        if (frame.empty()) break;
-
-        // Encode the frame to JPEG format
-        std::vector<uchar> encoded_frame;
-        cv::imencode(".jpg", frame, encoded_frame);
-
-        // Send the size of the encoded frame
-        int frame_size = encoded_frame.size();
-        if (SSL_write(cli_ssl, &frame_size, sizeof(frame_size)) < 0) {
-            std::cerr << "Error sending frame size\n";
-            break;
-        }
-
-        // Send the encoded frame data
-        if (SSL_write(cli_ssl, encoded_frame.data(), frame_size) < 0) {
-            std::cerr << "Error sending frame data\n";
-            break;
-        }
-
-        // Limit frame rate
-        cv::waitKey(1000 / FRAME_RATE);
-        int len;
-        char buffer[4096] = {0};
-        SSL_read(cli_ssl, &len, sizeof(int));
-        SSL_read(cli_ssl, buffer, len);
-        if (!strcmp(buffer, "STOP_STREAM")) {
-            std::cout << "[CLIENT][";
-            std::cout << std::setw(3) << usrno;
-            std::cout << "Stop streaming" << std::endl;
-            break;
-        }
-        else if (strcmp(buffer, "CONTINUE")!= 0) {
-            std::cout << "[CLIENT]error, received " << std::string(buffer) << std::endl;
-        }
-        
-
-    }
+    std::cout << "buffer checked" << std::endl;
+    std::string stream_command = "ffmpeg -loglevel quiet -i " + filename + " -c:v libx264 -f mpegts udp://127.0.0.1:" + std::to_string(23456);
+    // ffmpeg -loglevel quiet -i input_video.mp4 -c:v libx264 -preset veryfast -b:v 1500k -c:a aac -b:a 128k -f mpegts udp://
+    std::cout << "running :" << stream_command << std::endl;
+    system(stream_command.c_str());
 }
 
 //* ==================================== functions ====================================
@@ -674,6 +639,8 @@ void handle_client(request req) {
                         strcpy(send_buf,"FILE_FOUND\0");
                         SSL_write(clireq.ssl, &len, sizeof(int));
                         SSL_write(clireq.ssl, send_buf, len * sizeof(char));
+                        len = 12345+req.usrno;
+                        SSL_write(clireq.ssl, &len, sizeof(int));
                     }
                     accounts.streaming(clireq.ssl, clireq.conn_fd, clireq.usrno, filename);
                 }
